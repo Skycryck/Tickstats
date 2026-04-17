@@ -1,0 +1,89 @@
+# .github/workflows/update-stats.yml
+# ════════════════════════════════════════════════════════════
+# Automatically regenerate the HTML dashboard whenever the
+# stats JSON files change in any stats/*/data/ folder.
+# ════════════════════════════════════════════════════════════
+
+name: Update Minecraft Stats Dashboard
+
+on:
+  push:
+    paths:
+      - "stats/*/data/**"
+
+  # Allow manual runs from the Actions tab
+  workflow_dispatch:
+    inputs:
+      server:
+        description: "Server folder name (e.g. my-server)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Detect changed servers
+        id: detect
+        run: |
+          if [ -n "${{ github.event.inputs.server }}" ]; then
+            # Manual run: use the provided server
+            echo "servers=${{ github.event.inputs.server }}" >> $GITHUB_OUTPUT
+          else
+            # Automatic run: detect modified folders
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'stats/*/data/' 2>/dev/null \
+              | sed 's|stats/\([^/]*\)/data/.*|\1|' \
+              | sort -u \
+              | tr '\n' ' ')
+
+            # Fallback: if HEAD~1 doesn't exist (first commit)
+            if [ -z "$CHANGED" ]; then
+              CHANGED=$(find stats/*/data -name "*.json" -print \
+                | sed 's|stats/\([^/]*\)/data/.*|\1|' \
+                | sort -u \
+                | tr '\n' ' ')
+            fi
+
+            echo "servers=$CHANGED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate dashboards
+        run: |
+          for SERVER in ${{ steps.detect.outputs.servers }}; do
+            DATA_DIR="stats/${SERVER}/data"
+            if [ -d "$DATA_DIR" ]; then
+              echo "══════════════════════════════════════"
+              echo "Generating dashboard for: $SERVER"
+              echo "══════════════════════════════════════"
+
+              # Turn the folder name into a readable title
+              # my-server-2026 → "My Server 2026"
+              TITLE=$(echo "$SERVER" | sed 's/-/ /g' | sed 's/\b\w/\U&/g')
+
+              python scripts/generate.py "$DATA_DIR" --title "$TITLE"
+            else
+              echo "Directory $DATA_DIR not found, skipping"
+            fi
+          done
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stats/*/index.html stats/*/.uuid_cache.json
+          if git diff --staged --quiet; then
+            echo "No changes detected, nothing to commit"
+          else
+            git commit -m "Auto-update stats dashboard [skip ci]"
+            git push
+          fi
